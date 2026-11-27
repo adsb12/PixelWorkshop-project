@@ -16,6 +16,13 @@ internal sealed class WorkerOverlay : Window
     private readonly Dictionary<Guid, Figure> figures = [];
     private readonly Queue<SceneRequest> pending = new();
     private readonly ExplorerProps props = new();
+    private readonly Canvas sceneLayer = new();
+    private Guid? sceneWorker;
+    private nint clippedExplorer;
+    private DateTimeOffset nextClip;
+    private Rect lastArea = Rect.Empty;
+    private Rect lastExplorer = Rect.Empty;
+    private List<Rect> lastCovers = [];
     private ExplorerScene? scene;
     private (ExplorerScene Scene, Task<ExplorerView?> Read)? probe;
     private DateTimeOffset nextProbe;
@@ -34,7 +41,8 @@ internal sealed class WorkerOverlay : Window
         ShowActivated = false;
         ShowInTaskbar = false;
         Content = canvas;
-        canvas.Children.Add(props);
+        canvas.Children.Add(sceneLayer);
+        sceneLayer.Children.Add(props);
         Panel.SetZIndex(props, -1);
 
         SourceInitialized += (_, _) =>
@@ -67,6 +75,9 @@ internal sealed class WorkerOverlay : Window
         Top = area.Top;
         Width = area.Width;
         Height = area.Height;
+        sceneLayer.Width = area.Width;
+        sceneLayer.Height = area.Height;
+        clippedExplorer = 0;
         props.Width = area.Width;
         props.Height = area.Height;
         patrolStart = start - area.Left;
@@ -93,8 +104,12 @@ internal sealed class WorkerOverlay : Window
             var ids = workers.Select(worker => worker.Id).ToHashSet();
             foreach (var id in figures.Keys.Where(id => !ids.Contains(id)).ToArray())
             {
-                canvas.Children.Remove(figures[id].Sprite);
-                canvas.Children.Remove(figures[id].Bubble);
+                var figure = figures[id];
+                if (figure.Sprite.Parent is Panel layer)
+                {
+                    layer.Children.Remove(figure.Sprite);
+                    layer.Children.Remove(figure.Bubble);
+                }
                 figures.Remove(id);
             }
 
@@ -163,6 +178,8 @@ internal sealed class WorkerOverlay : Window
 
         TrackExplorer(now, area);
         var sceneFrame = scene?.Frame(area);
+        PlaceSceneWorker(scene?.Request.WorkerId);
+        UpdateSceneClip(now, area, scene?.Handle ?? 0);
         props.Show(sceneFrame);
 
         var index = 0;
@@ -208,6 +225,62 @@ internal sealed class WorkerOverlay : Window
             }
             scene = null;
         }
+    }
+
+    private void PlaceSceneWorker(Guid? id)
+    {
+        if (sceneWorker == id)
+            return;
+
+        if (sceneWorker is { } previous && figures.TryGetValue(previous, out var leaving))
+            Move(leaving, sceneLayer, canvas);
+        if (id is { } next && figures.TryGetValue(next, out var joining))
+            Move(joining, canvas, sceneLayer);
+        sceneWorker = id;
+
+        static void Move(Figure figure, Canvas from, Canvas to)
+        {
+            from.Children.Remove(figure.Sprite);
+            from.Children.Remove(figure.Bubble);
+            to.Children.Add(figure.Sprite);
+            to.Children.Add(figure.Bubble);
+        }
+    }
+
+    private void UpdateSceneClip(DateTimeOffset now, Rect area, nint explorer)
+    {
+        if (explorer == 0)
+        {
+            clippedExplorer = 0;
+            sceneLayer.Clip = null;
+            sceneLayer.Visibility = Visibility.Visible;
+            return;
+        }
+
+        var changed = explorer != clippedExplorer || area != lastArea;
+        if (!changed && now < nextClip)
+            return;
+
+        nextClip = now.AddMilliseconds(75);
+        clippedExplorer = explorer;
+        lastArea = area;
+        var screen = new Rect(PointToScreen(area.TopLeft), PointToScreen(area.BottomRight));
+        var (bounds, covers) = ExplorerTracking.ReadOcclusion(explorer, new WindowInteropHelper(this).Handle, screen);
+        if (!changed && bounds == lastExplorer && covers.SequenceEqual(lastCovers))
+            return;
+
+        lastExplorer = bounds;
+        lastCovers = covers;
+        // Some hide/close reactions still use the last known scene position.
+        var mask = new GeometryGroup { FillRule = FillRule.Nonzero };
+        foreach (var cover in covers)
+            mask.Children.Add(new RectangleGeometry(ToLocal(cover)));
+
+        var fullyCovered = !bounds.IsEmpty && covers.Count != 0 &&
+            Geometry.Combine(new RectangleGeometry(ToLocal(bounds)), mask, GeometryCombineMode.Exclude, null).IsEmpty();
+        sceneLayer.Visibility = fullyCovered ? Visibility.Hidden : Visibility.Visible;
+        sceneLayer.Clip = mask.Children.Count == 0 ? null :
+            new CombinedGeometry(GeometryCombineMode.Exclude, new RectangleGeometry(area), mask);
     }
 
     private void TrackExplorer(DateTimeOffset now, Rect area)

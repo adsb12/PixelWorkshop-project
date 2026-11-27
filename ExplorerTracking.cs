@@ -129,10 +129,37 @@ internal static class ExplorerTracking
             Marshal.ReleaseComObject(value);
     }
 
+    internal static (Rect Explorer, List<Rect> Covers) ReadOcclusion(nint explorer, nint overlay, Rect area)
+    {
+        const uint previousWindow = 3; // GW_HWNDPREV, toward the front of the Z order
+        const int cloakedAttribute = 14;
+        var covers = new List<Rect>();
+        var bounds = Rect.Intersect(FrameBounds(explorer), area);
+        if (bounds.IsEmpty || !IsWindowVisible(explorer) || IsIconic(explorer))
+            return (Rect.Empty, covers);
+
+        var visited = new HashSet<nint> { explorer };
+        for (var window = GetWindow(explorer, previousWindow); window != 0 && visited.Add(window);
+            window = GetWindow(window, previousWindow))
+        {
+            if (window == overlay || !IsWindowVisible(window) || IsIconic(window))
+                continue;
+
+            if (DwmGetWindowAttribute(window, cloakedAttribute, out int cloaked, sizeof(int)) == 0 && cloaked != 0)
+                continue;
+
+            var cover = Rect.Intersect(FrameBounds(window), area);
+            if (!cover.IsEmpty && cover.Width > 0 && cover.Height > 0)
+                covers.Add(cover);
+        }
+
+        return (bounds, covers);
+    }
+
     private static Rect FrameBounds(nint handle)
     {
         const int extendedFrameBounds = 9;
-        if (DwmGetWindowAttribute(handle, extendedFrameBounds, out var rect, Marshal.SizeOf<NativeRect>()) != 0 &&
+        if (DwmGetWindowAttribute(handle, extendedFrameBounds, out NativeRect rect, Marshal.SizeOf<NativeRect>()) != 0 &&
             !GetWindowRect(handle, out rect))
             return Rect.Empty;
 
@@ -149,6 +176,12 @@ internal static class ExplorerTracking
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(nint handle, int attribute, out NativeRect rect, int size);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(nint handle, int attribute, out int value, int size);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetWindow(nint handle, uint command);
 
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(nint handle, out NativeRect rect);
