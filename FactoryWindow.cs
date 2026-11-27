@@ -37,6 +37,7 @@ internal sealed class FactoryWindow : Window
             ToolTip = "일꾼 관리"
         };
         Content = button;
+        management.PreviewRequested += overlay.Preview;
         button.Click += (_, _) =>
         {
             management.Refresh();
@@ -82,6 +83,8 @@ internal sealed class ManagementWindow : Window
     private readonly TextBlock feedback = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button add = new() { Content = "일꾼 만들기", Margin = new Thickness(0, 12, 0, 0) };
 
+    internal event Action<Worker, bool>? PreviewRequested;
+
     internal ManagementWindow()
     {
         Title = "픽셀작업소 · 일꾼 관리";
@@ -96,7 +99,19 @@ internal sealed class ManagementWindow : Window
         list.DisplayMemberPath = nameof(WorkerRow.Label);
         var remove = new Button { Content = "선택한 일꾼 해제", Margin = new Thickness(0, 6, 0, 6), IsEnabled = false };
         panel.Children.Add(remove);
-        list.SelectionChanged += (_, _) => remove.IsEnabled = list.SelectedItem is WorkerRow;
+        var previews = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
+        var ladder = new Button { Content = "사다리 미리보기", IsEnabled = false, Margin = new Thickness(0, 0, 8, 0) };
+        var rope = new Button { Content = "로프 미리보기", IsEnabled = false };
+        previews.Children.Add(ladder);
+        previews.Children.Add(rope);
+        panel.Children.Add(previews);
+        list.SelectionChanged += (_, _) =>
+        {
+            var selected = list.SelectedItem is WorkerRow;
+            remove.IsEnabled = ladder.IsEnabled = rope.IsEnabled = selected;
+        };
+        ladder.Click += (_, _) => Preview(rope: false);
+        rope.Click += (_, _) => Preview(rope: true);
         remove.Click += (_, _) => Try(() =>
         {
             if (list.SelectedItem is not WorkerRow row)
@@ -142,6 +157,15 @@ internal sealed class ManagementWindow : Window
         add.IsEnabled = workers.Count < Jobs.MaxWorkers;
         feedback.Text = $"일꾼 {workers.Count}/{Jobs.MaxWorkers}";
     });
+
+    private void Preview(bool rope)
+    {
+        if (list.SelectedItem is not WorkerRow row)
+            return;
+
+        Hide();
+        PreviewRequested?.Invoke(row.Worker, rope);
+    }
 
     private void Add()
     {

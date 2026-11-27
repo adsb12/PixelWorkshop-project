@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -13,13 +14,18 @@ internal sealed class WorkerOverlay : Window
     private const double WalkSpeed = 18;
     private readonly Canvas canvas = new() { ClipToBounds = true };
     private readonly Dictionary<Guid, Figure> figures = [];
-    private readonly DispatcherTimer animation = new() { Interval = TimeSpan.FromMilliseconds(100) };
+    private readonly Queue<SceneRequest> pending = new();
+    private readonly ExplorerProps props = new();
+    private ExplorerScene? scene;
+    private (ExplorerScene Scene, Task<ExplorerView?> Read)? probe;
+    private DateTimeOffset nextProbe;
+    private double patrolStart;
+    private readonly DispatcherTimer animation = new() { Interval = TimeSpan.FromMilliseconds(33) };
     private readonly DispatcherTimer updates = new() { Interval = TimeSpan.FromSeconds(1) };
 
     internal WorkerOverlay()
     {
         Title = "픽셀작업소 일꾼";
-        Height = 88;
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
@@ -28,6 +34,8 @@ internal sealed class WorkerOverlay : Window
         ShowActivated = false;
         ShowInTaskbar = false;
         Content = canvas;
+        canvas.Children.Add(props);
+        Panel.SetZIndex(props, -1);
 
         SourceInitialized += (_, _) =>
         {
@@ -55,9 +63,26 @@ internal sealed class WorkerOverlay : Window
 
     internal void Place(Rect area, double start)
     {
-        Left = start;
-        Top = area.Bottom - Height;
-        Width = Math.Max(SpriteWidth, Math.Min(560, area.Right - start));
+        Left = area.Left;
+        Top = area.Top;
+        Width = area.Width;
+        Height = area.Height;
+        props.Width = area.Width;
+        props.Height = area.Height;
+        patrolStart = start - area.Left;
+    }
+
+    internal void Preview(Worker worker, bool rope)
+    {
+        UpdateWorkers();
+        var date = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        Enqueue(new SceneRequest(worker.Id, worker.Parent, date, rope, "도착했어요!", Preview: true));
+    }
+
+    private void Enqueue(SceneRequest request)
+    {
+        if (pending.Count < Jobs.MaxWorkers && !pending.Contains(request))
+            pending.Enqueue(request);
     }
 
     private void UpdateWorkers()
@@ -100,8 +125,16 @@ internal sealed class WorkerOverlay : Window
                 figure.LastStatus = status.Updated;
                 if (DateTimeOffset.Now - status.Updated < TimeSpan.FromSeconds(12))
                 {
-                    figure.Bubble.Text = $"{worker.Name} · {status.Message}";
-                    figure.BubbleUntil = DateTimeOffset.Now.AddSeconds(5);
+                    var result = $"{worker.Name} · {status.Message}";
+                    if (status.FolderDate is { } date)
+                    {
+                        var rope = TimeOnly.FromDateTime(status.Updated.LocalDateTime) >= worker.CleanAt;
+                        Enqueue(new SceneRequest(worker.Id, worker.Parent, date, rope, result));
+                    }
+                    else
+                    {
+                        Speak(figure, result);
+                    }
                 }
             }
         }
@@ -114,20 +147,102 @@ internal sealed class WorkerOverlay : Window
     private void DrawFrame()
     {
         var now = DateTimeOffset.Now;
-        var index = 0;
-        foreach (var figure in figures.Values)
+        var area = new Rect(0, 0, Width, Height);
+        if (scene is not null && !figures.ContainsKey(scene.Request.WorkerId))
+            scene = null;
+
+        while (scene is null && pending.TryDequeue(out var next))
         {
-            var lane = Width / figures.Count;
-            var range = Math.Max(0, lane - SpriteWidth);
-            figure.Distance = (figure.Distance + WalkSpeed / 10) % Math.Max(1, range * 2);
-            var x = lane * index++ + Math.Min(figure.Distance, Math.Max(0, range * 2 - figure.Distance));
-            Canvas.SetLeft(figure.Sprite, x);
-            Canvas.SetBottom(figure.Sprite, 0);
-            figure.Sprite.Step(figure.Distance <= range);
-            figure.Bubble.Visibility = now < figure.BubbleUntil ? Visibility.Visible : Visibility.Collapsed;
-            Canvas.SetLeft(figure.Bubble, Math.Clamp(x, 0, Math.Max(0, Width - 210)));
-            Canvas.SetBottom(figure.Bubble, 32);
+            if (figures.TryGetValue(next.WorkerId, out var worker))
+            {
+                var x = Canvas.GetLeft(worker.Sprite);
+                scene = new ExplorerScene(next, double.IsFinite(x) ? x + SpriteWidth / 2 : patrolStart + SpriteWidth);
+                nextProbe = now;
+            }
         }
+
+        TrackExplorer(now, area);
+        var sceneFrame = scene?.Frame(area);
+        props.Show(sceneFrame);
+
+        var index = 0;
+        foreach (var (id, figure) in figures)
+        {
+            var lane = Math.Max(0, Math.Min(560, Width - patrolStart)) / figures.Count;
+            var range = Math.Max(0, lane - SpriteWidth);
+            figure.Distance = (figure.Distance + WalkSpeed * 0.033) % Math.Max(1, range * 2);
+            var x = patrolStart + lane * index++ + Math.Min(figure.Distance, Math.Max(0, range * 2 - figure.Distance));
+            var feet = new Point(x + SpriteWidth / 2, area.Bottom);
+            var right = figure.Distance <= range;
+            var pose = WorkerPose.Walk;
+            var speech = now < figure.BubbleUntil ? figure.Message : null;
+            if (scene?.Request.WorkerId == id && sceneFrame is { } frame)
+            {
+                feet = frame.Feet;
+                right = frame.Right;
+                pose = frame.Pose;
+                speech = frame.Speech ?? speech;
+            }
+
+            Canvas.SetLeft(figure.Sprite, feet.X - SpriteWidth / 2);
+            Canvas.SetTop(figure.Sprite, feet.Y - figure.Sprite.Height);
+            figure.Sprite.Step(right, pose);
+            figure.Bubble.Visibility = speech is null ? Visibility.Collapsed : Visibility.Visible;
+            if (speech is not null)
+                figure.Bubble.Text = speech;
+            Canvas.SetLeft(figure.Bubble, Math.Clamp(feet.X - 10, 0, Math.Max(0, Width - 210)));
+            Canvas.SetTop(figure.Bubble, Math.Max(0, feet.Y - 54));
+        }
+
+        if (scene is { Finished: true } finished)
+        {
+            if (finished.Handle == 0 && figures.TryGetValue(finished.Request.WorkerId, out var figure))
+            {
+                var text = finished.Request.Preview ? "대상 폴더가 열린 탐색기 창을 찾아 주세요." : finished.Request.Result;
+                Speak(figure, text);
+            }
+            else if (finished.Interrupted && !finished.Request.Preview &&
+                figures.TryGetValue(finished.Request.WorkerId, out var interrupted))
+            {
+                Speak(interrupted, finished.Request.Result);
+            }
+            scene = null;
+        }
+    }
+
+    private void TrackExplorer(DateTimeOffset now, Rect area)
+    {
+        if (probe is { } ready && ready.Read.IsCompleted)
+        {
+            probe = null;
+            if (ready.Read.IsFaulted)
+                System.Diagnostics.Debug.WriteLine(ready.Read.Exception);
+            if (scene == ready.Scene)
+            {
+                var snapshot = ready.Read.IsCompletedSuccessfully ? ready.Read.Result : null;
+                if (snapshot is not null)
+                    snapshot = snapshot with { Window = ToLocal(snapshot.Window), Item = ToLocal(snapshot.Item) };
+                scene.Observe(snapshot, area);
+            }
+        }
+
+        if (probe is null && scene is { NeedsSnapshot: true } current && now >= nextProbe)
+        {
+            nextProbe = now.AddMilliseconds(250);
+            var handle = current.Handle;
+            var request = current.Request;
+            var screenArea = new Rect(PointToScreen(area.TopLeft), PointToScreen(area.BottomRight));
+            probe = (current, Task.Run(() => ExplorerTracking.Read(request.Parent, request.Date, handle, screenArea)));
+        }
+    }
+
+    private Rect ToLocal(Rect screen) => screen.IsEmpty ? Rect.Empty :
+        new Rect(PointFromScreen(screen.TopLeft), PointFromScreen(screen.BottomRight));
+
+    private static void Speak(Figure figure, string text)
+    {
+        figure.Message = text;
+        figure.BubbleUntil = DateTimeOffset.Now.AddSeconds(5);
     }
 
     private static readonly Color[] Palette =
@@ -140,6 +255,7 @@ internal sealed class WorkerOverlay : Window
         internal Sprite Sprite { get; } = sprite;
         internal TextBlock Bubble { get; } = bubble;
         internal DateTimeOffset LastStatus { get; set; }
+        internal string? Message { get; set; }
         internal DateTimeOffset BubbleUntil { get; set; }
         internal double Distance { get; set; }
     }
@@ -149,6 +265,8 @@ internal sealed class WorkerOverlay : Window
         private readonly Brush outfit;
         private bool facingRight;
         private int frame;
+        private int ticks;
+        private WorkerPose pose;
 
         internal Sprite(Color color)
         {
@@ -157,11 +275,15 @@ internal sealed class WorkerOverlay : Window
             outfit = new SolidColorBrush(color);
         }
 
-        internal void Step(bool right)
+        internal void Step(bool right, WorkerPose newPose)
         {
+            var frameChanged = ++ticks % 3 == 0;
+            if (frameChanged)
+                frame = (frame + 1) % 4;
+            if (frameChanged || pose != newPose || facingRight != right)
+                InvalidateVisual();
             facingRight = right;
-            frame = (frame + 1) % 4;
-            InvalidateVisual();
+            pose = newPose;
         }
 
         protected override void OnRender(DrawingContext dc)
@@ -174,9 +296,27 @@ internal sealed class WorkerOverlay : Window
             Pixels(Brushes.Bisque, 2, 2, 4, 2);
             Pixels(Brushes.DarkSlateGray, facingRight ? 5 : 2, 2, 1, 1);
             Pixels(outfit, 2, 4, 4, 3);
-            Pixels(Brushes.Bisque, facingRight ? 6 : 1, 5 + frame % 2, 1, 1);
-            Pixels(Brushes.DarkSlateGray, frame < 2 ? 1 : 2, 7, 2, frame % 2 + 1);
-            Pixels(Brushes.DarkSlateGray, frame < 2 ? 5 : 4, 7, 2, 2 - frame % 2);
+            var swing = frame % 2;
+            switch (pose)
+            {
+                case WorkerPose.Climb:
+                    Pixels(Brushes.Bisque, 1, 3 + swing * 2, 1, 2);
+                    Pixels(Brushes.Bisque, 6, 5 - swing * 2, 1, 2);
+                    break;
+                case WorkerPose.Work:
+                    Pixels(Brushes.Bisque, facingRight ? 6 : 0, 4 + swing, 2, 1);
+                    break;
+                case WorkerPose.Surprised:
+                    Pixels(Brushes.Bisque, 0, 3, 2, 2);
+                    Pixels(Brushes.Bisque, 6, 3, 2, 2);
+                    Pixels(Brushes.DarkSlateGray, 3, 3, 1, 1);
+                    break;
+                default:
+                    Pixels(Brushes.Bisque, facingRight ? 6 : 1, 5 + swing, 1, 1);
+                    break;
+            }
+            Pixels(Brushes.DarkSlateGray, frame < 2 ? 1 : 2, 7, 2, swing + 1);
+            Pixels(Brushes.DarkSlateGray, frame < 2 ? 5 : 4, 7, 2, 2 - swing);
         }
     }
 
