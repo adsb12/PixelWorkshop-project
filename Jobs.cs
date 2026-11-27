@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace PixelWorkshop;
 
-internal sealed record Worker(Guid Id, string Name, string Parent, TimeOnly CreateAt, TimeOnly CleanAt);
+internal sealed record Worker(Guid Id, string Name, string Parent, TimeOnly CleanAt, TimeOnly? CreateAt = null);
 internal sealed record JobState(string? FolderDate, FolderIdentity? Identity, DateTimeOffset Updated, string Message);
 
 internal static class Jobs
@@ -50,7 +50,42 @@ internal static class Jobs
         return true;
     });
 
-    internal static int Run(Guid id)
+    internal static void CheckOnStartup()
+    {
+        foreach (var worker in Workers())
+        {
+            if (worker.CreateAt is not null)
+                MigrateSchedule(worker.Id);
+            Run(worker.Id, atStartup: true);
+        }
+    }
+
+    private static void MigrateSchedule(Guid id)
+    {
+        try
+        {
+            Locked(() =>
+            {
+                var workers = Workers();
+                var index = workers.FindIndex(worker => worker.Id == id && worker.CreateAt is not null);
+                if (index < 0)
+                    return false;
+
+                var worker = workers[index] with { CreateAt = null };
+                WindowsSchedule.Register(worker, update: true);
+                workers[index] = worker;
+                Write(Settings, workers);
+                return true;
+            });
+        }
+        catch (Exception ex)
+        {
+            // The legacy morning trigger is harmless. Try updating it again on the next launch.
+            System.Diagnostics.Debug.WriteLine(ex);
+        }
+    }
+
+    internal static int Run(Guid id, bool atStartup = false)
     {
         try
         {
@@ -62,7 +97,7 @@ internal static class Jobs
 
                 var now = DateTime.Now;
                 var time = TimeOnly.FromDateTime(now);
-                if (time < worker.CreateAt)
+                if (atStartup != (time < worker.CleanAt))
                     return 0;
 
                 var date = now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -73,7 +108,7 @@ internal static class Jobs
                 var result = 0;
                 try
                 {
-                    if (time < worker.CleanAt)
+                    if (atStartup)
                     {
                         if (FolderOperations.TryCreate(path) is { } created)
                         {

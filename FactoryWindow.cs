@@ -78,7 +78,6 @@ internal sealed class ManagementWindow : Window
     private readonly ListBox list = new() { MinHeight = 112 };
     private readonly TextBox name = new() { MaxLength = 20 };
     private readonly TextBox parent = new();
-    private readonly TextBox create = new() { Text = "09:00", MaxLength = 5 };
     private readonly TextBox clean = new() { Text = "17:30", MaxLength = 5 };
     private readonly TextBlock feedback = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button add = new() { Content = "일꾼 만들기", Margin = new Thickness(0, 12, 0, 0) };
@@ -135,7 +134,7 @@ internal sealed class ManagementWindow : Window
                 parent.Text = dialog.FolderName;
         };
         Field(panel, "대상 폴더", pathRow);
-        Field(panel, "매일 생성 시간 (HH:mm)", create);
+        panel.Children.Add(new TextBlock { Text = "앱을 켜면 오늘 날짜 폴더를 확인해요." });
         Field(panel, "매일 정리 시간 (HH:mm)", clean);
         panel.Children.Add(add);
         panel.Children.Add(feedback);
@@ -171,12 +170,14 @@ internal sealed class ManagementWindow : Window
     {
         if (!Path.IsPathFullyQualified(parent.Text.Trim()) || !Directory.Exists(parent.Text.Trim()))
             throw new InvalidOperationException("존재하는 폴더의 전체 경로를 선택해 주세요.");
-        if (!ReadTime(create.Text, out var createAt) || !ReadTime(clean.Text, out var cleanAt) || cleanAt <= createAt)
-            throw new InvalidOperationException("시간을 HH:mm으로 입력하고 정리 시간을 생성 시간보다 늦게 설정해 주세요.");
+        if (!ReadTime(clean.Text, out var cleanAt))
+            throw new InvalidOperationException("정리 시간을 HH:mm으로 입력해 주세요.");
 
         var label = name.Text.Trim();
         var path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(parent.Text.Trim()));
-        Jobs.Add(new Worker(Guid.NewGuid(), label.Length == 0 ? "일꾼" : label, path, createAt, cleanAt));
+        var worker = new Worker(Guid.NewGuid(), label.Length == 0 ? "일꾼" : label, path, cleanAt);
+        Jobs.Add(worker);
+        _ = Task.Run(() => Jobs.Run(worker.Id, atStartup: true));
         name.Clear();
         Refresh();
         feedback.Text = "일꾼을 만들고 매일 실행할 예약을 등록했어요.";
@@ -199,6 +200,6 @@ internal sealed class ManagementWindow : Window
 
     private sealed record WorkerRow(Worker Worker)
     {
-        public string Label => $"{Worker.Name} · {Worker.CreateAt:HH\\:mm}–{Worker.CleanAt:HH\\:mm}\n{Worker.Parent}";
+        public string Label => $"{Worker.Name} · {Worker.CleanAt:HH\\:mm} 정리\n{Worker.Parent}";
     }
 }

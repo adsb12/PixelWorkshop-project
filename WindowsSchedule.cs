@@ -7,7 +7,7 @@ namespace PixelWorkshop;
 
 internal static class WindowsSchedule
 {
-    internal static void Register(Worker worker)
+    internal static void Register(Worker worker, bool update = false)
     {
         using var identity = WindowsIdentity.GetCurrent();
         var user = identity.User!.Value;
@@ -23,7 +23,7 @@ internal static class WindowsSchedule
 
         var task = new XElement(ns + "Task", new XAttribute("version", "1.2"),
             new XElement(ns + "RegistrationInfo", new XElement(ns + "Description", $"픽셀작업소 · {worker.Name}")),
-            new XElement(ns + "Triggers", Daily(worker.CreateAt), Daily(worker.CleanAt)),
+            new XElement(ns + "Triggers", Daily(worker.CleanAt)),
             new XElement(ns + "Principals", new XElement(ns + "Principal", new XAttribute("id", "Worker"),
                 new XElement(ns + "UserId", user),
                 new XElement(ns + "LogonType", "InteractiveToken"),
@@ -40,8 +40,8 @@ internal static class WindowsSchedule
 
         WithRoot(root =>
         {
-            // TASK_CREATE and TASK_LOGON_INTERACTIVE_TOKEN.
-            object registered = root.RegisterTask(Name(worker.Id), task.ToString(), 2, user, null, 3);
+            // TASK_CREATE or TASK_CREATE_OR_UPDATE, with TASK_LOGON_INTERACTIVE_TOKEN.
+            object registered = root.RegisterTask(Name(worker.Id), task.ToString(), update ? 6 : 2, user, null, 3);
             Marshal.ReleaseComObject(registered);
         });
     }

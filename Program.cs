@@ -19,6 +19,15 @@ internal static class Program
 
         var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
         var factory = new FactoryWindow();
+        factory.Loaded += async (_, _) =>
+        {
+            try { await Task.Run(Jobs.CheckOnStartup); }
+            catch (Exception ex)
+            {
+                if (!app.Dispatcher.HasShutdownStarted)
+                    MessageBox.Show(factory, ex.Message, "일꾼 출근 확인 실패");
+            }
+        };
         return app.Run(factory);
     }
 }
